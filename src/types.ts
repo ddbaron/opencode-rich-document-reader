@@ -41,7 +41,9 @@ export interface RichDocumentResultMetadata {
   media: MediaIndexEntry[];
 }
 
-export type RichDocumentToolResult = Extract<ToolResult, { output: string }>;
+export type RichDocumentToolResult = Omit<Extract<ToolResult, { output: string }>, "metadata"> & {
+  metadata?: RichDocumentResultMetadata;
+};
 
 export interface MediaRecord {
   entry: MediaIndexEntry;
