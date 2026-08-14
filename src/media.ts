@@ -5,6 +5,7 @@ import type { MediaIndexEntry, MediaRecord } from "./types.ts";
 
 interface LocationContext {
   heading?: string;
+  sectionNumber?: number;
   slideNumber?: number;
   inNotes: boolean;
 }
@@ -27,14 +28,25 @@ function attachmentNameOf(node: OfficeContentNode): string | undefined {
 function locationFor(context: LocationContext): string {
   const parts: string[] = [];
   if (context.slideNumber !== undefined) parts.push(`Slide ${context.slideNumber}`);
+  if (context.sectionNumber !== undefined) parts.push(`Section ${context.sectionNumber}`);
   if (context.heading) parts.push(`Section: ${context.heading}`);
   if (context.inNotes) parts.push("Notes");
   return parts.join(" - ") || "Document body";
 }
 
-function collectAttachmentLocations(nodes: OfficeContentNode[], locations: Map<string, string>, parent: LocationContext): void {
+export function sectionBoundariesFor(ast: OfficeParserAST): boolean[] | undefined {
+  if (ast.type !== "docx") return undefined;
+  return ast.content.map((node) => /<w:sectPr(?:\s|\/?>)/.test(node.rawContent ?? ""));
+}
+
+function collectAttachmentLocations(
+  nodes: OfficeContentNode[],
+  locations: Map<string, string>,
+  parent: LocationContext,
+  sectionBoundaries?: readonly boolean[],
+): void {
   let inherited = { ...parent };
-  for (const node of nodes) {
+  for (const [index, node] of nodes.entries()) {
     const metadata = node.metadata;
     const context: LocationContext = { ...inherited };
 
@@ -67,6 +79,9 @@ function collectAttachmentLocations(nodes: OfficeContentNode[], locations: Map<s
     if (node.type === "slide" && context.slideNumber !== undefined) {
       inherited.slideNumber = context.slideNumber;
     }
+    if (sectionBoundaries?.[index] && index < nodes.length - 1) {
+      inherited.sectionNumber = (inherited.sectionNumber ?? 1) + 1;
+    }
   }
 }
 
@@ -89,7 +104,16 @@ export async function writeMedia(
   temporaryDirectory: string,
 ): Promise<MediaRecord[]> {
   const locations = new Map<string, string>();
-  collectAttachmentLocations(ast.content, locations, { inNotes: false });
+  const sectionBoundaries = sectionBoundariesFor(ast);
+  const hasMultipleSections = sectionBoundaries?.some(
+    (boundary, index) => boundary && index < ast.content.length - 1,
+  ) ?? false;
+  collectAttachmentLocations(
+    ast.content,
+    locations,
+    { inNotes: false, ...(hasMultipleSections ? { sectionNumber: 1 } : {}) },
+    sectionBoundaries,
+  );
   if (ast.auxiliary) {
     collectAttachmentLocations(ast.auxiliary.headers ?? [], locations, { inNotes: false });
     collectAttachmentLocations(ast.auxiliary.footers ?? [], locations, { inNotes: false });

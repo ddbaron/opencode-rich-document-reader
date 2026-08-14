@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import type { ToolAttachment } from "@opencode-ai/plugin";
@@ -10,6 +11,7 @@ import {
   mediaTable,
   selectedAttachments,
   selectMedia,
+  sectionBoundariesFor,
   writeMedia,
 } from "./media.ts";
 import { DocumentPathError, projectPaths, resolveDocumentPath } from "./path-safety.ts";
@@ -128,6 +130,41 @@ function toolAttachments(records: MediaRecord[]): ToolAttachment[] {
   return selectedAttachments(records);
 }
 
+async function readValidatedDocument(absolutePath: string, documentInput: string): Promise<Buffer> {
+  try {
+    const documentHandle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const documentStat = await documentHandle.stat();
+      if (!documentStat.isFile()) {
+        throw new RichDocumentError("NOT_A_FILE", `Document path is not a regular file: ${documentInput}`);
+      }
+      if (documentStat.size > READER_LIMITS.maxArchiveBytes) {
+        throw new RichDocumentError(
+          "ARCHIVE_SIZE_LIMIT",
+          `Document archive is too large (${documentStat.size} bytes). The limit is ${READER_LIMITS.maxArchiveBytes} bytes.`,
+        );
+      }
+      const input = await readFile(documentHandle);
+      if (input.byteLength > READER_LIMITS.maxArchiveBytes) {
+        throw new RichDocumentError(
+          "ARCHIVE_SIZE_LIMIT",
+          `Document archive is too large (${input.byteLength} bytes). The limit is ${READER_LIMITS.maxArchiveBytes} bytes.`,
+        );
+      }
+      return input;
+    } finally {
+      await documentHandle.close().catch(() => undefined);
+    }
+  } catch (error) {
+    if (error instanceof RichDocumentError) throw error;
+    throw new RichDocumentError(
+      "UNREADABLE_DOCUMENT",
+      `Document is not readable: ${documentInput} (${errorMessage(error)})`,
+      { cause: error },
+    );
+  }
+}
+
 function enforceTableCellLimit(ast: OfficeParserAST, sourcePath: string): void {
   const pending: OfficeContentNode[] = [...ast.content];
   for (const nodes of [ast.auxiliary?.headers, ast.auxiliary?.footers, ast.auxiliary?.slideMasters]) {
@@ -167,9 +204,7 @@ function contextHeading(text: string): OfficeContentNode {
 }
 
 function addDocumentContext(ast: OfficeParserAST): OfficeParserAST {
-  const sectionBoundaries = ast.type === "docx"
-    ? ast.content.map((node) => /<w:sectPr(?:\s|\/?>)/.test(node.rawContent ?? ""))
-    : [];
+  const sectionBoundaries = sectionBoundariesFor(ast) ?? [];
   const hasMultipleSections = sectionBoundaries.some(
     (boundary, index) => boundary && index < ast.content.length - 1,
   );
@@ -289,16 +324,7 @@ export async function readRichDocument(
     );
   }
 
-  let input: Buffer;
-  try {
-    input = await readFile(resolved.absolutePath);
-  } catch (error) {
-    throw new RichDocumentError(
-      "UNREADABLE_DOCUMENT",
-      `Document is not readable: ${args.path} (${errorMessage(error)})`,
-      { cause: error },
-    );
-  }
+  const input = await readValidatedDocument(resolved.absolutePath, args.path);
 
   const issues: ParseIssue[] = [];
   const ast = await parseDocument(format, input, context, args.path, issues);

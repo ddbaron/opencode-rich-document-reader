@@ -61,6 +61,64 @@ describe("read_rich_document", () => {
     assert.doesNotMatch(result.output, /iVBORw0KGgo/);
   });
 
+  it("associates media after a DOCX section boundary with the physical section", async () => {
+    const ast = {
+      config: {},
+      type: "docx",
+      metadata: {},
+      content: [
+        {
+          type: "heading",
+          text: "First section",
+          children: [{ type: "text", text: "First section" }],
+          metadata: { level: 1 },
+        },
+        {
+          type: "paragraph",
+          rawContent: "<w:p><w:pPr><w:sectPr/></w:pPr></w:p>",
+          children: [],
+        },
+        {
+          type: "image",
+          metadata: { attachmentName: "after-section.png" },
+          children: [],
+        },
+      ],
+      attachments: [
+        {
+          type: "image",
+          name: "after-section.png",
+          extension: "png",
+          mimeType: "image/png",
+          data: "iVBORw0KGgo=",
+        },
+      ],
+      warnings: [],
+      to: async () => ({ value: "after section", messages: [] }),
+      toText: () => "",
+    } as unknown as OfficeParserAST;
+    const formats = new Map([
+      [
+        ".docx",
+        {
+          extension: ".docx",
+          parserType: "docx" as const,
+          parse: async () => ast,
+        },
+      ],
+    ]);
+    await writeFile(join(fixtures.root, "sectioned.docx"), Buffer.from("fixture"));
+
+    const result = await readRichDocument(
+      { path: "sectioned.docx" },
+      context(),
+      { formats },
+    );
+    rememberExtraction(result);
+
+    assert.equal(result.metadata?.media[0].location, "Section 2 - Section: First section");
+  });
+
   it("extracts ODT structure and associates media with the nearest section", async () => {
     const result = await readRichDocument({ path: "structure.odt" }, context());
     rememberExtraction(result);
