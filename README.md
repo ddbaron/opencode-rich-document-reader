@@ -22,11 +22,11 @@ Ask the agent to call `read_rich_document` with a document path inside the curre
 {"path":"docs/architecture.docx"}
 ```
 
-The tool returns structure-preserving Markdown for headings, lists, tables, links, sections, slide context, notes, and supported document content.
+The tool returns structure-preserving Markdown for headings, lists, tables, links, sections, slide context, notes, and supported document content. It also returns a structured media index in tool metadata.
 
 It appends an ordered embedded-media index containing each attachment's source name, MIME type, document section, and isolated temporary path.
 
-Use the built-in `read` tool on a listed image path when vision inspection is relevant.
+Use a media label from the index when vision inspection is relevant. The selected image is returned as a native OpenCode file attachment, while its isolated temporary path remains available for follow-up tools.
 
 Media is not attached by default, which prevents documents with many screenshots from inflating the model context.
 
@@ -35,6 +35,8 @@ To attach selected image media directly to the next model turn, call the tool ag
 ```json
 {"path":"docs/architecture.docx","media":["media-1"]}
 ```
+
+Selectable image media supports `image/jpeg`, `image/png`, `image/gif`, `image/bmp`, `image/tiff`, `image/svg+xml`, and `image/webp` attachments.
 
 ## Safety and boundaries
 
