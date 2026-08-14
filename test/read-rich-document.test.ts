@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import type { OfficeParserAST } from "officeparser";
 import { RichDocumentReaderPlugin } from "../src/index.ts";
 import { READER_LIMITS } from "../src/limits.ts";
@@ -266,13 +266,13 @@ describe("read_rich_document", () => {
   });
 
   it("rejects lexical path escapes and symlinks that resolve outside the project", async () => {
-    const outside = join(dirname(fixtures.root), "outside.docx");
+    const outside = join(dirname(fixtures.root), `${basename(fixtures.root)}-outside.docx`);
     const link = join(fixtures.root, "escaped.docx");
     await writeFile(outside, Buffer.from("outside"));
     await symlink(outside, link);
 
     await assert.rejects(
-      () => readRichDocument({ path: "../outside.docx" }, context()),
+      () => readRichDocument({ path: relative(fixtures.root, outside) }, context()),
       /escapes the current project/i,
     );
     await assert.rejects(
