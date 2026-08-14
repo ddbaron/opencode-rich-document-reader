@@ -1,0 +1,153 @@
+import assert from "node:assert/strict";
+import { after, before, describe, it } from "node:test";
+import { readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { RichDocumentReaderPlugin } from "../src/index.ts";
+import { readRichDocument } from "../src/reader.ts";
+import { createFixtures } from "./fixtures.ts";
+
+let fixtures: Awaited<ReturnType<typeof createFixtures>>;
+const extractedDirectories = new Set<string>();
+
+function context() {
+  const abort = new AbortController();
+  return { directory: fixtures.root, worktree: fixtures.root, abort: abort.signal };
+}
+
+function rememberExtraction(result: { metadata?: { media?: Array<{ temporaryPath: string }> } }) {
+  for (const item of result.metadata?.media ?? []) extractedDirectories.add(dirname(item.temporaryPath));
+}
+
+before(async () => {
+  fixtures = await createFixtures();
+});
+
+after(async () => {
+  await rm(fixtures.root, { recursive: true, force: true });
+  await Promise.all(
+    [...extractedDirectories].map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
+
+describe("plugin registration", () => {
+  it("registers exactly the read_rich_document agent tool", async () => {
+    const hooks = await RichDocumentReaderPlugin({} as never);
+    assert.deepEqual(Object.keys(hooks.tool ?? {}), ["read_rich_document"]);
+    assert.equal(typeof hooks.tool?.read_rich_document.execute, "function");
+  });
+});
+
+describe("read_rich_document", () => {
+  it("extracts DOCX structure, media, and section association without default attachments", async () => {
+    const result = await readRichDocument({ path: "structure.docx" }, context());
+    rememberExtraction(result);
+
+    assert.match(result.output, /# Project Overview/);
+    assert.match(result.output, /First bullet/);
+    assert.match(result.output, /\| Header \| Value \|/);
+    assert.match(result.output, /\[Open reference\]\(https:\/\/example\.com\/reference\)/);
+    assert.match(result.output, /`media-1`/);
+    assert.match(result.output, /image1\.png/);
+    assert.match(result.output, /image\/png/);
+    assert.match(result.output, /Section: Project Overview/);
+    assert.equal(result.attachments, undefined);
+    assert.ok(result.metadata);
+    assert.equal(result.metadata.media.length, 1);
+    assert.equal(await stat(result.metadata.media[0].temporaryPath).then(() => true), true);
+    assert.doesNotMatch(result.output, /iVBORw0KGgo/);
+  });
+
+  it("extracts ODT structure and associates media with the nearest section", async () => {
+    const result = await readRichDocument({ path: "structure.odt" }, context());
+    rememberExtraction(result);
+
+    assert.match(result.output, /# ODT Section/);
+    assert.match(result.output, /ODT bullet/);
+    assert.match(result.output, /ODT Header/);
+    assert.match(result.output, /`media-1`/);
+    assert.match(result.output, /Section: ODT Section/);
+    assert.ok(result.metadata);
+    assert.equal(result.metadata.format, "odt");
+  });
+
+  it("retains PPTX slide and speaker-note context while indexing its image", async () => {
+    const result = await readRichDocument({ path: "slides.pptx" }, context());
+    rememberExtraction(result);
+
+    assert.match(result.output, /PPTX Slide One/);
+    assert.match(result.output, /Slide bullet/);
+    assert.match(result.output, /Speaker notes/);
+    assert.match(result.output, /Slide 1/);
+    assert.ok(result.metadata);
+    assert.equal(result.metadata.format, "pptx");
+    assert.match(result.metadata.media[0].location, /^Slide 1/);
+  });
+
+  it("attaches only explicitly selected image media as a native file attachment", async () => {
+    const result = await readRichDocument({ path: "structure.docx", media: ["media-1"] }, context());
+    rememberExtraction(result);
+
+    assert.equal(result.attachments?.length, 1);
+    assert.equal(result.attachments?.[0].type, "file");
+    assert.equal(result.attachments?.[0].mime, "image/png");
+    assert.match(result.attachments?.[0].url ?? "", /^data:image\/png;base64,/);
+    assert.match(result.attachments?.[0].filename ?? "", /^media-1\.png$/);
+    assert.doesNotMatch(result.output, /iVBORw0KGgo/);
+  });
+
+  it("leaves the source document byte-for-byte unchanged", async () => {
+    const beforeBytes = await readFile(fixtures.docx);
+    const beforeStat = await stat(fixtures.docx);
+    const result = await readRichDocument({ path: "structure.docx" }, context());
+    rememberExtraction(result);
+    const afterBytes = await readFile(fixtures.docx);
+    const afterStat = await stat(fixtures.docx);
+
+    assert.deepEqual(afterBytes, beforeBytes);
+    assert.equal(afterStat.mtimeMs, beforeStat.mtimeMs);
+  });
+
+  it("rejects lexical path escapes and symlinks that resolve outside the project", async () => {
+    const outside = join(dirname(fixtures.root), "outside.docx");
+    const link = join(fixtures.root, "escaped.docx");
+    await writeFile(outside, Buffer.from("outside"));
+    await symlink(outside, link);
+
+    await assert.rejects(
+      () => readRichDocument({ path: "../outside.docx" }, context()),
+      /escapes the current project/i,
+    );
+    await assert.rejects(
+      () => readRichDocument({ path: "escaped.docx" }, context()),
+      /symlink resolves outside/i,
+    );
+
+    await rm(link, { force: true });
+    await rm(outside, { force: true });
+  });
+
+  it("rejects unsupported, missing, and malformed documents with useful errors", async () => {
+    await writeFile(join(fixtures.root, "notes.pdf"), Buffer.from("not supported"));
+    await writeFile(join(fixtures.root, "broken.docx"), Buffer.from("not a zip archive"));
+
+    await assert.rejects(
+      () => readRichDocument({ path: "notes.pdf" }, context()),
+      /unsupported document extension/i,
+    );
+    await assert.rejects(
+      () => readRichDocument({ path: "missing.docx" }, context()),
+      /document not found/i,
+    );
+    await assert.rejects(
+      () => readRichDocument({ path: "broken.docx" }, context()),
+      /could not parse document|zip|corrupt|malformed/i,
+    );
+  });
+
+  it("rejects an unknown media selector instead of attaching every image", async () => {
+    await assert.rejects(
+      () => readRichDocument({ path: "structure.docx", media: ["media-99"] }, context()),
+      /unknown media selector/i,
+    );
+  });
+});

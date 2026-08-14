@@ -1,0 +1,4 @@
+node_modules/
+coverage/
+.roam/
+.DS_Store
