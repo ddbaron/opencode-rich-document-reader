@@ -20,6 +20,7 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Set([
   "image/bmp",
   "image/tiff",
   "image/svg+xml",
+  "image/webp",
 ]);
 
 function textOf(node: OfficeContentNode): string {
@@ -199,13 +200,19 @@ function isSupportedImageMimeType(mimeType: string): boolean {
 export function selectMedia(records: MediaRecord[], selectors: string[] | undefined): MediaRecord[] {
   if (!selectors?.length) return [];
 
+  const recordsBySelector = new Map<string, MediaRecord>();
+  for (const record of records) {
+    if (!recordsBySelector.has(record.entry.label)) recordsBySelector.set(record.entry.label, record);
+    if (!recordsBySelector.has(record.entry.originalName)) {
+      recordsBySelector.set(record.entry.originalName, record);
+    }
+  }
+  const available = records.map(({ entry }) => entry.label).join(", ") || "none";
   const selected: MediaRecord[] = [];
+  const selectedLabels = new Set<string>();
   for (const selector of selectors) {
-    const record = records.find(
-      ({ entry }) => entry.label === selector || entry.originalName === selector,
-    );
+    const record = recordsBySelector.get(selector);
     if (!record) {
-      const available = records.map(({ entry }) => entry.label).join(", ") || "none";
       throw new MediaSelectionError(`Unknown media selector "${selector}". Available media labels: ${available}.`);
     }
     if (record.attachment.type !== "image" || !isSupportedImageMimeType(record.entry.mimeType)) {
@@ -213,7 +220,10 @@ export function selectMedia(records: MediaRecord[], selectors: string[] | undefi
         `Media selector "${selector}" does not name a supported image and cannot be attached.`,
       );
     }
-    if (!selected.some((item) => item.entry.label === record.entry.label)) selected.push(record);
+    if (!selectedLabels.has(record.entry.label)) {
+      selectedLabels.add(record.entry.label);
+      selected.push(record);
+    }
   }
   return selected;
 }

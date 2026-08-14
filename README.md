@@ -36,6 +36,8 @@ To attach selected image media directly to the next model turn, call the tool ag
 {"path":"docs/architecture.docx","media":["media-1"]}
 ```
 
+Selectable image media supports `image/jpeg`, `image/png`, `image/gif`, `image/bmp`, `image/tiff`, `image/svg+xml`, and `image/webp` attachments.
+
 ## Safety and boundaries
 
 The source document is read without modification.

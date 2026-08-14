@@ -210,6 +210,49 @@ describe("read_rich_document", () => {
     assert.doesNotMatch(result.output, /iVBORw0KGgo/);
   });
 
+  it("attaches selected WebP image media", async () => {
+    const ast = {
+      config: {},
+      type: "docx",
+      metadata: {},
+      content: [{ type: "image", metadata: { attachmentName: "diagram.webp" }, children: [] }],
+      attachments: [
+        {
+          type: "image" as const,
+          name: "diagram.webp",
+          extension: "webp",
+          mimeType: "image/webp",
+          data: "UklGRg==",
+        },
+      ],
+      warnings: [],
+      to: async () => ({ value: "webp", messages: [] }),
+      toText: () => "",
+    } as unknown as OfficeParserAST;
+    const formats = new Map([
+      [
+        ".docx",
+        {
+          extension: ".docx",
+          parserType: "docx" as const,
+          parse: async () => ast,
+        },
+      ],
+    ]);
+    await writeFile(join(fixtures.root, "webp.docx"), Buffer.from("fixture"));
+
+    const result = await readRichDocument(
+      { path: "webp.docx", media: ["diagram.webp", "media-1", "diagram.webp"] },
+      context(),
+      { formats },
+    );
+    rememberExtraction(result);
+
+    assert.equal(result.attachments?.length, 1);
+    assert.equal(result.attachments?.[0].mime, "image/webp");
+    assert.match(result.attachments?.[0].filename ?? "", /^media-1\.webp$/);
+  });
+
   it("leaves the source document byte-for-byte unchanged", async () => {
     const beforeBytes = await readFile(fixtures.docx);
     const beforeStat = await stat(fixtures.docx);
