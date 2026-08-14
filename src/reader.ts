@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import type { ToolAttachment } from "@opencode-ai/plugin";
@@ -80,9 +80,14 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+function isAbortError(error: unknown): error is Error {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 function parserError(error: unknown, sourcePath: string): Error {
   if (error instanceof RichDocumentError) return error;
   if (error instanceof DocumentPathError) return error;
+  if (isAbortError(error)) return error;
 
   const issue =
     error && typeof error === "object" && "officeIssue" in error && error.officeIssue
@@ -130,8 +135,13 @@ function toolAttachments(records: MediaRecord[]): ToolAttachment[] {
   return selectedAttachments(records);
 }
 
-async function readValidatedDocument(absolutePath: string, documentInput: string): Promise<Buffer> {
+async function readValidatedDocument(
+  absolutePath: string,
+  documentInput: string,
+  abortSignal: AbortSignal,
+): Promise<Buffer> {
   try {
+    abortSignal.throwIfAborted();
     const documentHandle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const documentStat = await documentHandle.stat();
@@ -144,18 +154,34 @@ async function readValidatedDocument(absolutePath: string, documentInput: string
           `Document archive is too large (${documentStat.size} bytes). The limit is ${READER_LIMITS.maxArchiveBytes} bytes.`,
         );
       }
-      const input = await readFile(documentHandle);
-      if (input.byteLength > READER_LIMITS.maxArchiveBytes) {
-        throw new RichDocumentError(
-          "ARCHIVE_SIZE_LIMIT",
-          `Document archive is too large (${input.byteLength} bytes). The limit is ${READER_LIMITS.maxArchiveBytes} bytes.`,
+      const chunks: Buffer[] = [];
+      let totalBytes = 0;
+      while (totalBytes <= READER_LIMITS.maxArchiveBytes) {
+        abortSignal.throwIfAborted();
+        const chunkSize = Math.min(
+          1024 * 1024,
+          READER_LIMITS.maxArchiveBytes + 1 - totalBytes,
         );
+        const chunk = Buffer.allocUnsafe(chunkSize);
+        const { bytesRead } = await documentHandle.read(chunk, 0, chunkSize, totalBytes);
+        if (!bytesRead) break;
+        chunks.push(chunk.subarray(0, bytesRead));
+        totalBytes += bytesRead;
+        if (totalBytes > READER_LIMITS.maxArchiveBytes) {
+          throw new RichDocumentError(
+            "ARCHIVE_SIZE_LIMIT",
+            `Document archive is too large (${totalBytes} bytes). The limit is ${READER_LIMITS.maxArchiveBytes} bytes.`,
+          );
+        }
       }
-      return input;
+      abortSignal.throwIfAborted();
+      return Buffer.concat(chunks, totalBytes);
     } finally {
       await documentHandle.close().catch(() => undefined);
     }
   } catch (error) {
+    if (abortSignal.aborted) abortSignal.throwIfAborted();
+    if (isAbortError(error)) throw error;
     if (error instanceof RichDocumentError) throw error;
     throw new RichDocumentError(
       "UNREADABLE_DOCUMENT",
@@ -165,7 +191,18 @@ async function readValidatedDocument(absolutePath: string, documentInput: string
   }
 }
 
-function enforceTableCellLimit(ast: OfficeParserAST, sourcePath: string): void {
+function enforceTableCellLimit(ast: OfficeParserAST, sourcePath: string, issues: ParseIssue[]): void {
+  const tableLimitWarning = [...issues.map(({ issue }) => issue), ...ast.warnings].find(
+    (issue) => String(issue.code) === "TABLE_CELL_LIMIT_EXCEEDED",
+  );
+  if (tableLimitWarning) {
+    throw new RichDocumentError(
+      "TABLE_CELL_LIMIT",
+      `Document ${sourcePath} exceeded the table cell limit during parsing. The limit is ${READER_LIMITS.maxTableCells}.`,
+      { cause: tableLimitWarning },
+    );
+  }
+
   const pending: OfficeContentNode[] = [...ast.content];
   for (const nodes of [ast.auxiliary?.headers, ast.auxiliary?.footers, ast.auxiliary?.slideMasters]) {
     if (nodes) {
@@ -236,7 +273,8 @@ async function parseDocument(
   issues: ParseIssue[],
 ): Promise<OfficeParserAST> {
   try {
-    return await format.parse(input, {
+    context.abort.throwIfAborted();
+    const ast = await format.parse(input, {
       ...parserLimits(),
       extractAttachments: true,
       ignoreComments: false,
@@ -248,7 +286,10 @@ async function parseDocument(
       abortSignal: context.abort,
       includeRawContent: format.parserType === "docx",
     });
+    context.abort.throwIfAborted();
+    return ast;
   } catch (error) {
+    if (context.abort.aborted) context.abort.throwIfAborted();
     throw parserError(error, sourcePath);
   }
 }
@@ -257,15 +298,23 @@ async function extractMedia(
   ast: OfficeParserAST,
   baseTemporaryDirectory: string,
   sourcePath: string,
+  abortSignal: AbortSignal,
 ): Promise<{ temporaryDirectory?: string; records: MediaRecord[] }> {
   let temporaryDirectory: string | undefined;
   try {
+    abortSignal.throwIfAborted();
     if (ast.attachments.length) {
       temporaryDirectory = await mkdtemp(join(baseTemporaryDirectory, "opencode-rich-document-"));
     }
-    const records = temporaryDirectory ? await writeMedia(ast, temporaryDirectory) : [];
+    const records = temporaryDirectory ? await writeMedia(ast, temporaryDirectory, abortSignal) : [];
+    abortSignal.throwIfAborted();
     return { temporaryDirectory, records };
   } catch (error) {
+    if (temporaryDirectory) {
+      await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
+    }
+    if (abortSignal.aborted) abortSignal.throwIfAborted();
+    if (isAbortError(error)) throw error;
     throw extractionError(error, sourcePath);
   }
 }
@@ -285,18 +334,25 @@ async function convertMarkdown(
   ast: OfficeParserAST,
   sourcePath: string,
   issues: ParseIssue[],
+  abortSignal: AbortSignal,
 ) {
   try {
-    return await ast.to("md", {
+    abortSignal.throwIfAborted();
+    const conversion = await ast.to("md", {
       includeImages: false,
       includeCharts: false,
+      abortSignal,
       onWarning: (issue) => issues.push({ issue, source: "conversion" }),
       mdConfig: {
         dialect: "github",
         fallbackToHtml: true,
       },
     });
+    abortSignal.throwIfAborted();
+    return conversion;
   } catch (error) {
+    if (abortSignal.aborted) abortSignal.throwIfAborted();
+    if (isAbortError(error)) throw error;
     throw conversionError(error, sourcePath);
   }
 }
@@ -306,9 +362,11 @@ export async function readRichDocument(
   context: ReaderToolContext,
   dependencies: ReadRichDocumentDependencies = {},
 ): Promise<RichDocumentToolResult> {
+  context.abort.throwIfAborted();
   const projectRoot = projectRootFor(context);
   const paths = projectPaths(context, args.path);
   const resolved = await resolveDocumentPath(paths.documentPath, paths.projectRoot);
+  context.abort.throwIfAborted();
   const format = formatForExtension(resolved.extension, dependencies.formats ?? formatRegistry);
 
   if (!format) {
@@ -324,19 +382,30 @@ export async function readRichDocument(
     );
   }
 
-  const input = await readValidatedDocument(resolved.absolutePath, args.path);
+  const input = await readValidatedDocument(resolved.absolutePath, args.path, context.abort);
 
   const issues: ParseIssue[] = [];
   const ast = await parseDocument(format, input, context, args.path, issues);
-  enforceTableCellLimit(ast, args.path);
+  context.abort.throwIfAborted();
+  enforceTableCellLimit(ast, args.path, issues);
 
   let temporaryDirectory: string | undefined;
   let keepTemporaryDirectory = false;
   try {
-    const extraction = await extractMedia(ast, dependencies.tempDirectory ?? tmpdir(), args.path);
+    const extraction = await extractMedia(
+      ast,
+      dependencies.tempDirectory ?? tmpdir(),
+      args.path,
+      context.abort,
+    );
     temporaryDirectory = extraction.temporaryDirectory;
+    context.abort.throwIfAborted();
     const selected = selectRequestedMedia(extraction.records, args.media);
-    const conversion = await convertMarkdown(addDocumentContext(ast), args.path, issues);
+    context.abort.throwIfAborted();
+    const contextualAst = addDocumentContext(ast);
+    context.abort.throwIfAborted();
+    const conversion = await convertMarkdown(contextualAst, args.path, issues, context.abort);
+    context.abort.throwIfAborted();
 
     for (const issue of ast.warnings) issues.push({ issue, source: "parser" });
     for (const issue of conversion.messages) issues.push({ issue, source: "conversion" });
@@ -354,6 +423,7 @@ export async function readRichDocument(
       metadata,
     };
     if (attachments.length) result.attachments = attachments;
+    context.abort.throwIfAborted();
     keepTemporaryDirectory = true;
     return result;
   } finally {

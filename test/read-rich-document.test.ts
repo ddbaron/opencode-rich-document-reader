@@ -119,6 +119,58 @@ describe("read_rich_document", () => {
     assert.equal(result.metadata?.media[0].location, "Section 2 - Section: First section");
   });
 
+  it("labels media from headers, footers, and slide masters", async () => {
+    const node = (attachmentName: string, sectionNumber?: number) => ({
+      type: "image",
+      metadata: { attachmentName, ...(sectionNumber === undefined ? {} : { sectionNumber }) },
+      children: [],
+    });
+    const ast = {
+      config: {},
+      type: "pptx",
+      metadata: {},
+      content: [],
+      auxiliary: {
+        headers: [node("header.png", 2)],
+        footers: [node("footer.png")],
+        slideMasters: [node("master.png")],
+      },
+      attachments: ["header.png", "footer.png", "master.png"].map((name) => ({
+        type: "image" as const,
+        name,
+        extension: "png",
+        mimeType: "image/png",
+        data: "iVBORw0KGgo=",
+      })),
+      warnings: [],
+      to: async () => ({ value: "auxiliary media", messages: [] }),
+      toText: () => "",
+    } as unknown as OfficeParserAST;
+    const formats = new Map([
+      [
+        ".pptx",
+        {
+          extension: ".pptx",
+          parserType: "pptx" as const,
+          parse: async () => ast,
+        },
+      ],
+    ]);
+    await writeFile(join(fixtures.root, "auxiliary.pptx"), Buffer.from("fixture"));
+
+    const result = await readRichDocument(
+      { path: "auxiliary.pptx" },
+      context(),
+      { formats },
+    );
+    rememberExtraction(result);
+
+    assert.deepEqual(
+      result.metadata?.media.map((item) => item.location),
+      ["Header - Section 2", "Footer", "Slide master"],
+    );
+  });
+
   it("extracts ODT structure and associates media with the nearest section", async () => {
     const result = await readRichDocument({ path: "structure.odt" }, context());
     rememberExtraction(result);
@@ -212,6 +264,82 @@ describe("read_rich_document", () => {
       () => readRichDocument({ path: "structure.docx", media: ["media-99"] }, context()),
       /unknown media selector/i,
     );
+  });
+
+  it("rejects image-labeled attachments without an image MIME type", async () => {
+    const ast = {
+      config: {},
+      type: "docx",
+      metadata: {},
+      content: [{ type: "image", metadata: { attachmentName: "binary.bin" }, children: [] }],
+      attachments: [
+        {
+          type: "image" as const,
+          name: "binary.bin",
+          extension: "bin",
+          mimeType: "application/octet-stream",
+          data: "AA==",
+        },
+      ],
+      warnings: [],
+      to: async () => ({ value: "binary", messages: [] }),
+      toText: () => "",
+    } as unknown as OfficeParserAST;
+    const formats = new Map([
+      [
+        ".docx",
+        {
+          extension: ".docx",
+          parserType: "docx" as const,
+          parse: async () => ast,
+        },
+      ],
+    ]);
+    await writeFile(join(fixtures.root, "binary.docx"), Buffer.from("fixture"));
+
+    await assert.rejects(
+      () => readRichDocument({ path: "binary.docx", media: ["media-1"] }, context(), { formats }),
+      /supported image/i,
+    );
+  });
+
+  it("rejects parser-truncated tables before Markdown conversion", async () => {
+    let converted = false;
+    const warning = {
+      type: "warning" as const,
+      code: "TABLE_CELL_LIMIT_EXCEEDED",
+      message: "Table cell materialization reached its limit.",
+    };
+    const ast = {
+      config: {},
+      type: "odt",
+      metadata: {},
+      content: [],
+      attachments: [],
+      warnings: [warning],
+      to: async () => {
+        converted = true;
+        return { value: "should not convert", messages: [] };
+      },
+      toText: () => "",
+    } as unknown as OfficeParserAST;
+    const formats = new Map([
+      [
+        ".odt",
+        {
+          extension: ".odt",
+          parserType: "odt" as const,
+          parse: async () => ast,
+        },
+      ],
+    ]);
+    await writeFile(join(fixtures.root, "truncated.odt"), Buffer.from("fixture"));
+
+    await assert.rejects(
+      () => readRichDocument({ path: "truncated.odt" }, context(), { formats }),
+      /table cell limit/i,
+    );
+    assert.equal(converted, false);
   });
 
   it("rejects oversized tables before conversion", async () => {

@@ -5,6 +5,7 @@ import type { MediaIndexEntry, MediaRecord } from "./types.ts";
 
 interface LocationContext {
   heading?: string;
+  role?: string;
   sectionNumber?: number;
   slideNumber?: number;
   inNotes: boolean;
@@ -12,6 +13,14 @@ interface LocationContext {
 
 const OOXML_DOCUMENT_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const OOXML_CHART_MIME = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml";
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/bmp",
+  "image/tiff",
+  "image/svg+xml",
+]);
 
 function textOf(node: OfficeContentNode): string {
   return (node.text ?? "").replace(/\s+/g, " ").trim();
@@ -27,6 +36,7 @@ function attachmentNameOf(node: OfficeContentNode): string | undefined {
 
 function locationFor(context: LocationContext): string {
   const parts: string[] = [];
+  if (context.role) parts.push(context.role);
   if (context.slideNumber !== undefined) parts.push(`Slide ${context.slideNumber}`);
   if (context.sectionNumber !== undefined) parts.push(`Section ${context.sectionNumber}`);
   if (context.heading) parts.push(`Section: ${context.heading}`);
@@ -50,6 +60,9 @@ function collectAttachmentLocations(
     const metadata = node.metadata;
     const context: LocationContext = { ...inherited };
 
+    if (metadata && "sectionNumber" in metadata && typeof metadata.sectionNumber === "number") {
+      context.sectionNumber = metadata.sectionNumber;
+    }
     if (node.type === "slide" && metadata && "slideNumber" in metadata) {
       context.slideNumber = metadata.slideNumber;
     }
@@ -102,7 +115,9 @@ function mediaMimeType(attachment: OfficeAttachment): string {
 export async function writeMedia(
   ast: OfficeParserAST,
   temporaryDirectory: string,
+  abortSignal?: AbortSignal,
 ): Promise<MediaRecord[]> {
+  abortSignal?.throwIfAborted();
   const locations = new Map<string, string>();
   const sectionBoundaries = sectionBoundariesFor(ast);
   const hasMultipleSections = sectionBoundaries?.some(
@@ -115,15 +130,26 @@ export async function writeMedia(
     sectionBoundaries,
   );
   if (ast.auxiliary) {
-    collectAttachmentLocations(ast.auxiliary.headers ?? [], locations, { inNotes: false });
-    collectAttachmentLocations(ast.auxiliary.footers ?? [], locations, { inNotes: false });
-    collectAttachmentLocations(ast.auxiliary.slideMasters ?? [], locations, { inNotes: false });
+    collectAttachmentLocations(ast.auxiliary.headers ?? [], locations, {
+      inNotes: false,
+      role: "Header",
+    });
+    collectAttachmentLocations(ast.auxiliary.footers ?? [], locations, {
+      inNotes: false,
+      role: "Footer",
+    });
+    collectAttachmentLocations(ast.auxiliary.slideMasters ?? [], locations, {
+      inNotes: false,
+      role: "Slide master",
+    });
   }
 
+  abortSignal?.throwIfAborted();
   await mkdir(temporaryDirectory, { recursive: true, mode: 0o700 });
   const records: MediaRecord[] = [];
 
   for (const [index, attachment] of ast.attachments.entries()) {
+    abortSignal?.throwIfAborted();
     const label = `media-${index + 1}`;
     const temporaryPath = join(temporaryDirectory, `${label}${safeExtension(attachment)}`);
     await writeFile(temporaryPath, Buffer.from(attachment.data, "base64"), { mode: 0o600 });
@@ -138,6 +164,7 @@ export async function writeMedia(
     records.push({ entry, attachment });
   }
 
+  abortSignal?.throwIfAborted();
   return records;
 }
 
@@ -165,6 +192,10 @@ export class MediaSelectionError extends Error {
   }
 }
 
+function isSupportedImageMimeType(mimeType: string): boolean {
+  return SUPPORTED_IMAGE_MIME_TYPES.has(mimeType.toLowerCase());
+}
+
 export function selectMedia(records: MediaRecord[], selectors: string[] | undefined): MediaRecord[] {
   if (!selectors?.length) return [];
 
@@ -177,9 +208,9 @@ export function selectMedia(records: MediaRecord[], selectors: string[] | undefi
       const available = records.map(({ entry }) => entry.label).join(", ") || "none";
       throw new MediaSelectionError(`Unknown media selector "${selector}". Available media labels: ${available}.`);
     }
-    if (record.attachment.type !== "image") {
+    if (record.attachment.type !== "image" || !isSupportedImageMimeType(record.entry.mimeType)) {
       throw new MediaSelectionError(
-        `Media selector "${selector}" does not name an image and cannot be attached.`,
+        `Media selector "${selector}" does not name a supported image and cannot be attached.`,
       );
     }
     if (!selected.some((item) => item.entry.label === record.entry.label)) selected.push(record);
