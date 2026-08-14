@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import type { ToolAttachment } from "@opencode-ai/plugin";
-import type { OfficeParserAST } from "officeparser";
+import type { OfficeContentNode, OfficeParserAST } from "officeparser";
 import { formatForExtension, formatRegistry } from "./registry.ts";
 import { READER_LIMITS, parserLimits } from "./limits.ts";
 import {
@@ -128,6 +128,71 @@ function toolAttachments(records: MediaRecord[]): ToolAttachment[] {
   return selectedAttachments(records);
 }
 
+function enforceTableCellLimit(ast: OfficeParserAST, sourcePath: string): void {
+  const pending: OfficeContentNode[] = [...ast.content];
+  for (const nodes of [ast.auxiliary?.headers, ast.auxiliary?.footers, ast.auxiliary?.slideMasters]) {
+    if (nodes) {
+      for (const node of nodes) pending.push(node);
+    }
+  }
+
+  let cellCount = 0;
+  while (pending.length) {
+    const node = pending.pop();
+    if (!node) continue;
+    if (node.type === "cell") {
+      cellCount += 1;
+      if (cellCount > READER_LIMITS.maxTableCells) {
+        throw new RichDocumentError(
+          "TABLE_CELL_LIMIT",
+          `Document ${sourcePath} contains too many table cells (${cellCount}). The limit is ${READER_LIMITS.maxTableCells}.`,
+        );
+      }
+    }
+    for (const nodes of [node.children, node.notes, node.comments]) {
+      if (nodes) {
+        for (const child of nodes) pending.push(child);
+      }
+    }
+  }
+}
+
+function contextHeading(text: string): OfficeContentNode {
+  return {
+    type: "heading",
+    text,
+    children: [{ type: "text", text }],
+    metadata: { level: 2 },
+  };
+}
+
+function addDocumentContext(ast: OfficeParserAST): OfficeParserAST {
+  const sectionBoundaries = ast.type === "docx"
+    ? ast.content.map((node) => /<w:sectPr(?:\s|\/?>)/.test(node.rawContent ?? ""))
+    : [];
+  const hasMultipleSections = sectionBoundaries.some(
+    (boundary, index) => boundary && index < ast.content.length - 1,
+  );
+  const content: OfficeContentNode[] = [];
+  let sectionNumber = 1;
+  let slideIndex = 0;
+
+  if (hasMultipleSections) content.push(contextHeading(`Section ${sectionNumber}`));
+  for (const [index, node] of ast.content.entries()) {
+    if (node.type === "slide") {
+      slideIndex += 1;
+      content.push(contextHeading(`Slide ${node.metadata?.slideNumber ?? slideIndex}`));
+    }
+    content.push(node);
+    if (hasMultipleSections && sectionBoundaries[index] && index < ast.content.length - 1) {
+      sectionNumber += 1;
+      content.push(contextHeading(`Section ${sectionNumber}`));
+    }
+  }
+
+  return content.length === ast.content.length ? ast : { ...ast, content };
+}
+
 async function parseDocument(
   format: NonNullable<ReturnType<typeof formatForExtension>>,
   input: Buffer,
@@ -146,6 +211,7 @@ async function parseDocument(
       ocr: false,
       onWarning: (issue) => issues.push({ issue, source: "parser" }),
       abortSignal: context.abort,
+      includeRawContent: format.parserType === "docx",
     });
   } catch (error) {
     throw parserError(error, sourcePath);
@@ -236,6 +302,7 @@ export async function readRichDocument(
 
   const issues: ParseIssue[] = [];
   const ast = await parseDocument(format, input, context, args.path, issues);
+  enforceTableCellLimit(ast, args.path);
 
   let temporaryDirectory: string | undefined;
   let keepTemporaryDirectory = false;
@@ -243,7 +310,7 @@ export async function readRichDocument(
     const extraction = await extractMedia(ast, dependencies.tempDirectory ?? tmpdir(), args.path);
     temporaryDirectory = extraction.temporaryDirectory;
     const selected = selectRequestedMedia(extraction.records, args.media);
-    const conversion = await convertMarkdown(ast, args.path, issues);
+    const conversion = await convertMarkdown(addDocumentContext(ast), args.path, issues);
 
     for (const issue of ast.warnings) issues.push({ issue, source: "parser" });
     for (const issue of conversion.messages) issues.push({ issue, source: "conversion" });

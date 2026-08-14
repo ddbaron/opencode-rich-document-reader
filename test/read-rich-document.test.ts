@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { OfficeParserAST } from "officeparser";
 import { RichDocumentReaderPlugin } from "../src/index.ts";
+import { READER_LIMITS } from "../src/limits.ts";
 import { readRichDocument } from "../src/reader.ts";
 import { createFixtures } from "./fixtures.ts";
 
@@ -49,6 +51,8 @@ describe("read_rich_document", () => {
     assert.match(result.output, /`media-1`/);
     assert.match(result.output, /image1\.png/);
     assert.match(result.output, /image\/png/);
+    assert.match(result.output, /## Section 1/);
+    assert.match(result.output, /## Section 2/);
     assert.match(result.output, /Section: Project Overview/);
     assert.equal(result.attachments, undefined);
     assert.ok(result.metadata);
@@ -77,10 +81,11 @@ describe("read_rich_document", () => {
     assert.match(result.output, /PPTX Slide One/);
     assert.match(result.output, /Slide bullet/);
     assert.match(result.output, /Speaker notes/);
-    assert.match(result.output, /Slide 1/);
+    assert.match(result.output.split("## Embedded media", 1)[0], /## Slide 1/);
     assert.ok(result.metadata);
     assert.equal(result.metadata.format, "pptx");
     assert.match(result.metadata.media[0].location, /^Slide 1/);
+    assert.equal(result.metadata.media.find((item) => item.type === "chart")?.mimeType, "application/vnd.openxmlformats-officedocument.drawingml.chart+xml");
   });
 
   it("attaches only explicitly selected image media as a native file attachment", async () => {
@@ -148,6 +153,37 @@ describe("read_rich_document", () => {
     await assert.rejects(
       () => readRichDocument({ path: "structure.docx", media: ["media-99"] }, context()),
       /unknown media selector/i,
+    );
+  });
+
+  it("rejects oversized tables before conversion", async () => {
+    const cell = { type: "cell" } as const;
+    const cells = Array.from({ length: READER_LIMITS.maxTableCells + 1 }, () => cell);
+    const ast = {
+      config: {},
+      type: "docx",
+      metadata: {},
+      content: [{ type: "table", children: [{ type: "row", children: cells }] }],
+      attachments: [],
+      warnings: [],
+      to: async () => ({ value: "should not convert", messages: [] }),
+      toText: () => "",
+    } as unknown as OfficeParserAST;
+    const formats = new Map([
+      [
+        ".docx",
+        {
+          extension: ".docx",
+          parserType: "docx" as const,
+          parse: async () => ast,
+        },
+      ],
+    ]);
+    await writeFile(join(fixtures.root, "oversized.docx"), Buffer.from("fixture"));
+
+    await assert.rejects(
+      () => readRichDocument({ path: "oversized.docx" }, context(), { formats }),
+      /too many table cells/i,
     );
   });
 });

@@ -9,6 +9,9 @@ interface LocationContext {
   inNotes: boolean;
 }
 
+const OOXML_DOCUMENT_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const OOXML_CHART_MIME = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml";
+
 function textOf(node: OfficeContentNode): string {
   return (node.text ?? "").replace(/\s+/g, " ").trim();
 }
@@ -75,6 +78,12 @@ function safeExtension(attachment: OfficeAttachment): string {
   return fromName || ".bin";
 }
 
+function mediaMimeType(attachment: OfficeAttachment): string {
+  const mimeType = String(attachment.mimeType);
+  if (attachment.type === "chart" && mimeType === OOXML_DOCUMENT_MIME) return OOXML_CHART_MIME;
+  return mimeType;
+}
+
 export async function writeMedia(
   ast: OfficeParserAST,
   temporaryDirectory: string,
@@ -98,7 +107,7 @@ export async function writeMedia(
       label,
       type: attachment.type,
       originalName: attachment.name,
-      mimeType: String(attachment.mimeType),
+      mimeType: mediaMimeType(attachment),
       temporaryPath,
       location: locations.get(attachment.name) ?? "Document body",
     };
