@@ -2,18 +2,24 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
-import type { OfficeParserAST } from "officeparser";
+import { fileURLToPath } from "node:url";
+import type { OfficeParserAST, OfficeParserConfig } from "officeparser";
 import { RichDocumentReaderPlugin } from "../src/index.ts";
 import { READER_LIMITS } from "../src/limits.ts";
 import { readRichDocument } from "../src/reader.ts";
+import { createOfficeFormat } from "../src/registry.ts";
 import { createFixtures } from "./fixtures.ts";
 
 let fixtures: Awaited<ReturnType<typeof createFixtures>>;
 const extractedDirectories = new Set<string>();
 
 function context() {
+  return projectContext(fixtures.root);
+}
+
+function projectContext(projectRoot: string) {
   const abort = new AbortController();
-  return { directory: fixtures.root, worktree: fixtures.root, abort: abort.signal };
+  return { directory: projectRoot, worktree: projectRoot, abort: abort.signal };
 }
 
 function rememberExtraction(result: { metadata?: { media?: Array<{ temporaryPath: string }> } }) {
@@ -40,6 +46,44 @@ describe("plugin registration", () => {
 });
 
 describe("read_rich_document", () => {
+  it("resolves named, default, and top-level officeparser exports", async () => {
+    const ast = {} as OfficeParserAST;
+    const calls: OfficeParserConfig[] = [];
+    const parseOffice = async (_input: Uint8Array, config: OfficeParserConfig) => {
+      calls.push(config);
+      return ast;
+    };
+    const namedParser = { parseOffice };
+    const defaultParser = Object.assign(function OfficeParser() {}, { parseOffice });
+
+    for (const parserModule of [
+      { OfficeParser: namedParser },
+      { default: defaultParser },
+      { parseOffice },
+      { OfficeParser: undefined, default: defaultParser, parseOffice },
+    ]) {
+      const format = createOfficeFormat("docx", parserModule);
+      assert.equal(await format.parse(new Uint8Array(), {}), ast);
+    }
+
+    assert.deepEqual(calls.map(({ fileType }) => fileType), ["docx", "docx", "docx", "docx"]);
+  });
+
+  it("reads the supplied pesticide records DOCX with content and metadata", async () => {
+    const sourcePath = "docs/maint-div/Pesticide Application Records.docx";
+    const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+    assert.equal((await stat(join(projectRoot, sourcePath))).isFile(), true);
+
+    const result = await readRichDocument({ path: sourcePath }, projectContext(projectRoot));
+
+    assert.match(result.output, /Pesticide Application Records/);
+    assert.match(result.output, /Applicators Name/);
+    assert.ok(result.metadata);
+    assert.equal(result.metadata.format, "docx");
+    assert.equal(result.metadata.sourcePath, sourcePath);
+    assert.deepEqual(result.metadata.media, []);
+  });
+
   it("extracts DOCX structure, media, and section association without default attachments", async () => {
     const result = await readRichDocument({ path: "structure.docx" }, context());
     rememberExtraction(result);

@@ -7,6 +7,7 @@ This file is the project's committed home for project-intrinsic agent knowledge:
 ## Project notes
 
 - The published package entry point and OpenCode tool registration live in `src/index.ts`; the reader, safety checks, format registry, and media extraction are split across `src/`.
+- `src/registry.ts` resolves `officeparser` through named, default, and top-level exports because OpenCode's Bun loader can leave the named `OfficeParser` binding undefined even for version 7.5.1.
 - Run `npm run check && npm test` for the local typecheck and executable fixture suite. The DOCX, ODT, and PPTX fixtures are generated as real ZIP archives by `test/fixtures.ts`.
 
 ## Maintaining this file
