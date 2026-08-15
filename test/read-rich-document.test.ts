@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import type { OfficeParserAST } from "officeparser";
 import { RichDocumentReaderPlugin } from "../src/index.ts";
@@ -59,6 +59,129 @@ describe("read_rich_document", () => {
     assert.equal(result.metadata.media.length, 1);
     assert.equal(await stat(result.metadata.media[0].temporaryPath).then(() => true), true);
     assert.doesNotMatch(result.output, /iVBORw0KGgo/);
+  });
+
+  it("keeps omitted export reads ephemeral", async () => {
+    const result = await readRichDocument({ path: "slides.pptx" }, context());
+    rememberExtraction(result);
+
+    assert.equal(result.metadata?.export, undefined);
+    assert.match(result.output, /Temporary path/);
+    assert.ok(result.metadata?.media[0].temporaryPath);
+    await assert.rejects(() => stat(join(fixtures.root, "slides.export")), { code: "ENOENT" });
+  });
+
+  it("writes a default sibling export with Markdown, all media, and a manifest", async () => {
+    const beforeBytes = await readFile(fixtures.docx);
+    const beforeStat = await stat(fixtures.docx);
+    const result = await readRichDocument({ path: "structure.docx", export: {} }, context());
+    rememberExtraction(result);
+
+    const exported = result.metadata?.export;
+    assert.ok(exported);
+    assert.ok(result.metadata);
+    const canonicalRoot = await realpath(fixtures.root);
+    assert.equal(exported.directoryPath, join(canonicalRoot, "structure.export"));
+    assert.equal(exported.markdownPath, join(exported.directoryPath, "structure.md"));
+    assert.equal(exported.mediaDirectoryPath, join(exported.directoryPath, "media"));
+    assert.equal(exported.manifestPath, join(exported.directoryPath, "manifest.json"));
+    assert.equal(exported.media.length, 1);
+    assert.equal((await stat(exported.mediaDirectoryPath)).isDirectory(), true);
+    assert.match(result.output, /# Project Overview/);
+    assert.match(result.output, /\| Exported path \|/);
+    assert.match(result.output, /media\/media-1\.png/);
+
+    const exportedMarkdown = await readFile(exported.markdownPath, "utf8");
+    assert.equal(exportedMarkdown, result.output);
+    assert.deepEqual(
+      await readFile(exported.media[0].path),
+      await readFile(result.metadata.media[0].temporaryPath),
+    );
+    const manifest = JSON.parse(await readFile(exported.manifestPath, "utf8"));
+    assert.equal(manifest.version, 1);
+    assert.equal(manifest.sourcePath, "structure.docx");
+    assert.equal(manifest.markdownPath, exported.markdownPath);
+    assert.equal(manifest.mediaDirectoryPath, exported.mediaDirectoryPath);
+    assert.deepEqual(manifest.media, exported.media);
+    assert.doesNotMatch(JSON.stringify(manifest), /opencode-rich-document-.*media-1/);
+
+    await rm(dirname(result.metadata.media[0].temporaryPath), { recursive: true, force: true });
+    assert.equal((await stat(exported.media[0].path)).isFile(), true);
+
+    assert.deepEqual(await readFile(fixtures.docx), beforeBytes);
+    assert.equal((await stat(fixtures.docx)).mtimeMs, beforeStat.mtimeMs);
+  });
+
+  it("writes a custom project-relative export and creates missing parent directories", async () => {
+    const result = await readRichDocument(
+      { path: "slides.pptx", export: { destination: "artifacts/slides" } },
+      context(),
+    );
+    rememberExtraction(result);
+
+    const exported = result.metadata?.export;
+    assert.ok(exported);
+    assert.ok(result.metadata);
+    const canonicalRoot = await realpath(fixtures.root);
+    assert.equal(exported.directoryPath, join(canonicalRoot, "artifacts", "slides"));
+    assert.equal(exported.media.length, result.metadata.media.length);
+    const manifest = JSON.parse(await readFile(exported.manifestPath, "utf8"));
+    assert.equal(manifest.exportDirectoryRelativePath, "artifacts/slides");
+    for (const media of exported.media) {
+      assert.equal(await stat(media.path).then(() => true), true);
+      assert.match(media.relativePath, /^media\/media-\d+\.[a-z0-9]+$/);
+    }
+  });
+
+  it("rejects absolute and project-escaping export destinations", async () => {
+    await assert.rejects(
+      () => readRichDocument({ path: "structure.docx", export: { destination: "../outside-export" } }, context()),
+      /export destination escapes the current project/i,
+    );
+    await assert.rejects(
+      () =>
+        readRichDocument(
+          { path: "structure.docx", export: { destination: join(fixtures.root, "absolute-export") } },
+          context(),
+        ),
+      /must be project-relative, not absolute/i,
+    );
+  });
+
+  it("rejects export destinations whose symlinked parent escapes the project", async () => {
+    const outside = join(dirname(fixtures.root), `${basename(fixtures.root)}-export-outside`);
+    const link = join(fixtures.root, "export-link");
+    await mkdir(outside);
+    await symlink(outside, link);
+
+    await assert.rejects(
+      () =>
+        readRichDocument(
+          { path: "structure.docx", export: { destination: "export-link/nested" } },
+          context(),
+        ),
+      /export destination symlink escapes the current project/i,
+    );
+
+    await rm(link, { force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+
+  it("rejects an existing export destination without overwriting it", async () => {
+    const destination = join(fixtures.root, "artifacts", "collision");
+    const marker = join(destination, "keep.txt");
+    await mkdir(destination, { recursive: true });
+    await writeFile(marker, "keep this file");
+
+    await assert.rejects(
+      () =>
+        readRichDocument(
+          { path: "structure.docx", export: { destination: "artifacts/collision" } },
+          context(),
+        ),
+      /already exists and was not overwritten/i,
+    );
+    assert.equal(await readFile(marker, "utf8"), "keep this file");
   });
 
   it("associates media after a DOCX section boundary with the physical section", async () => {

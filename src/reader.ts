@@ -1,21 +1,24 @@
 import { constants } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import type { ToolAttachment } from "@opencode-ai/plugin";
 import type { OfficeContentNode, OfficeParserAST } from "officeparser";
 import { formatForExtension, formatRegistry } from "./registry.ts";
 import { READER_LIMITS, parserLimits } from "./limits.ts";
 import {
   MediaSelectionError,
+  type MediaTableOptions,
   mediaTable,
   selectedAttachments,
   selectMedia,
   sectionBoundariesFor,
   writeMedia,
 } from "./media.ts";
-import { DocumentPathError, projectPaths, resolveDocumentPath } from "./path-safety.ts";
+import { DurableExportError, writeDurableExport } from "./export.ts";
+import { DocumentPathError, projectPaths, resolveDocumentPath, resolveExportDestination } from "./path-safety.ts";
 import type {
+  DurableExportMetadata,
   MediaIndexEntry,
   MediaRecord,
   ReadRichDocumentArgs,
@@ -70,9 +73,14 @@ function stripInlineMediaData(markdown: string): string {
   );
 }
 
-function completeMarkdown(markdown: string, records: MediaRecord[], issues: DocumentIssue[]): string {
+function completeMarkdown(
+  markdown: string,
+  records: MediaRecord[],
+  issues: DocumentIssue[],
+  mediaOptions?: MediaTableOptions,
+): string {
   const body = stripInlineMediaData(markdown.trim()) || "_No readable text content was found._";
-  return [body, mediaTable(records), warningSection(issues)].join("\n\n");
+  return [body, mediaTable(records, mediaOptions), warningSection(issues)].join("\n\n");
 }
 
 function errorMessage(error: unknown): string {
@@ -382,6 +390,10 @@ export async function readRichDocument(
     );
   }
 
+  const exportDestination = args.export
+    ? await resolveExportDestination(args.export.destination, paths.projectRoot, resolved.absolutePath)
+    : undefined;
+
   const input = await readValidatedDocument(resolved.absolutePath, args.path, context.abort);
 
   const issues: ParseIssue[] = [];
@@ -411,15 +423,42 @@ export async function readRichDocument(
     for (const issue of conversion.messages) issues.push({ issue, source: "conversion" });
 
     const media = attachmentMetadata(extraction.records);
+    const issuesForMarkdown = uniqueIssues(issues);
+    const ephemeralMarkdown = completeMarkdown(String(conversion.value), extraction.records, issuesForMarkdown);
+    let output = ephemeralMarkdown;
+    let exportMetadata: DurableExportMetadata | undefined;
+    if (exportDestination) {
+      const exportedMarkdown = completeMarkdown(String(conversion.value), extraction.records, issuesForMarkdown, {
+        pathHeading: "Exported path",
+        pathFor: (entry) => `media/${basename(entry.temporaryPath)}`,
+      });
+      try {
+        exportMetadata = await writeDurableExport({
+          destination: exportDestination,
+          sourcePath: sourceLabel(args.path, projectRoot, resolved.absolutePath),
+          format: format.parserType,
+          markdown: exportedMarkdown,
+          records: extraction.records,
+          abortSignal: context.abort,
+        });
+      } catch (error) {
+        if (error instanceof DurableExportError) {
+          throw new RichDocumentError(error.code, error.message, { cause: error });
+        }
+        throw error;
+      }
+      output = exportedMarkdown;
+    }
     const metadata: RichDocumentResultMetadata = {
       format: format.parserType,
       sourcePath: sourceLabel(args.path, projectRoot, resolved.absolutePath),
       media,
+      ...(exportMetadata ? { export: exportMetadata } : {}),
     };
     const attachments = toolAttachments(selected);
     const result: RichDocumentToolResult = {
       title: `Read ${sourceLabel(args.path, projectRoot, resolved.absolutePath)}`,
-      output: completeMarkdown(String(conversion.value), extraction.records, uniqueIssues(issues)),
+      output,
       metadata,
     };
     if (attachments.length) result.attachments = attachments;

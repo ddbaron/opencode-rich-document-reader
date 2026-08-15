@@ -16,6 +16,9 @@ export interface DocumentIssue {
 export interface ReadRichDocumentArgs {
   path: string;
   media?: string[];
+  export?: {
+    destination?: string;
+  };
 }
 
 export type ReaderToolContext = Pick<ToolContext, "directory" | "worktree" | "abort">;
@@ -39,6 +42,7 @@ export interface RichDocumentResultMetadata {
   format: SupportedFileType;
   sourcePath: string;
   media: MediaIndexEntry[];
+  export?: DurableExportMetadata;
 }
 
 export type RichDocumentToolResult = Omit<Extract<ToolResult, { output: string }>, "metadata"> & {
@@ -64,6 +68,30 @@ export interface ResolvedDocument {
 export interface ProjectPaths {
   projectRoot: string;
   documentPath: string;
+}
+
+export interface ResolvedExportDestination {
+  projectRoot: string;
+  absolutePath: string;
+  relativePath: string;
+}
+
+export interface DurableExportMedia {
+  label: string;
+  type: OfficeAttachment["type"];
+  originalName: string;
+  mimeType: string;
+  location: string;
+  path: string;
+  relativePath: string;
+}
+
+export interface DurableExportMetadata {
+  directoryPath: string;
+  markdownPath: string;
+  mediaDirectoryPath: string;
+  manifestPath: string;
+  media: DurableExportMedia[];
 }
 
 export interface ReadRichDocumentDependencies {
