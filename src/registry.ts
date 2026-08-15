@@ -1,13 +1,62 @@
-import { OfficeParser } from "officeparser";
+import * as officeParser from "officeparser";
 import type { OfficeParserConfig, SupportedFileType } from "officeparser";
 import type { RichDocumentFormat } from "./types.ts";
 
-function officeFormat(parserType: SupportedFileType): RichDocumentFormat {
+type ParseOffice = RichDocumentFormat["parse"];
+
+interface OfficeParserModuleValue {
+  OfficeParser?: unknown;
+  default?: unknown;
+  parseOffice?: unknown;
+}
+
+interface ResolvedParser {
+  parseOffice: ParseOffice;
+  receiver: unknown;
+}
+
+function moduleValue(value: unknown): OfficeParserModuleValue | undefined {
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) return undefined;
+  return value as OfficeParserModuleValue;
+}
+
+// Bun's CJS interop can leave the named OfficeParser binding undefined while
+// retaining the default class and top-level parseOffice export.
+function resolveOfficeParser(value: unknown, seen = new Set<object>()): ResolvedParser | undefined {
+  const candidate = moduleValue(value);
+  if (!candidate) return undefined;
+
+  const reference = value as object;
+  if (seen.has(reference)) return undefined;
+  seen.add(reference);
+
+  for (const nested of [candidate.OfficeParser, candidate.default]) {
+    const resolved = resolveOfficeParser(nested, seen);
+    if (resolved) return resolved;
+  }
+
+  if (typeof candidate.parseOffice === "function") {
+    return { parseOffice: candidate.parseOffice as ParseOffice, receiver: value };
+  }
+  return undefined;
+}
+
+function parserFor(module: unknown): ResolvedParser {
+  const parser = resolveOfficeParser(module);
+  if (!parser) throw new TypeError("officeparser does not expose a parseOffice function");
+  return parser;
+}
+
+export function createOfficeFormat(
+  parserType: SupportedFileType,
+  parserModule: unknown = officeParser,
+): RichDocumentFormat {
   return {
     extension: `.${parserType}`,
     parserType,
     parse(input: Uint8Array, config: OfficeParserConfig) {
-      return OfficeParser.parseOffice(input, { ...config, fileType: parserType });
+      const parser = parserFor(parserModule);
+      return parser.parseOffice.call(parser.receiver, input, { ...config, fileType: parserType });
     },
   };
 }
@@ -20,7 +69,7 @@ function officeFormat(parserType: SupportedFileType): RichDocumentFormat {
 export const formatRegistry: ReadonlyMap<string, RichDocumentFormat> = new Map(
   ["docx", "odt", "pptx"].map((format) => {
     const parserType = format as SupportedFileType;
-    return [`.${format}`, officeFormat(parserType)] as const;
+    return [`.${format}`, createOfficeFormat(parserType)] as const;
   }),
 );
 
