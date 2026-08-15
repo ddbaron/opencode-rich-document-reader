@@ -3,6 +3,11 @@ import { basename, extname, join } from "node:path";
 import type { OfficeAttachment, OfficeContentNode, OfficeParserAST } from "officeparser";
 import type { MediaIndexEntry, MediaRecord } from "./types.ts";
 
+export interface MediaTableOptions {
+  pathFor?: (entry: MediaIndexEntry) => string;
+  pathHeading?: string;
+}
+
 interface LocationContext {
   heading?: string;
   role?: string;
@@ -169,16 +174,18 @@ export async function writeMedia(
   return records;
 }
 
-export function mediaTable(records: MediaRecord[]): string {
+export function mediaTable(records: MediaRecord[], options: MediaTableOptions = {}): string {
   const cell = (value: string) => value.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
+  const pathHeading = options.pathHeading ?? "Temporary path";
+  const pathFor = options.pathFor ?? ((entry: MediaIndexEntry) => entry.temporaryPath);
   const rows = records.map(({ entry }) =>
-    `| \`${cell(entry.label)}\` | ${cell(entry.type)} | ${cell(entry.originalName)} | ${cell(entry.mimeType)} | ${cell(entry.temporaryPath)} | ${cell(entry.location)} |`,
+    `| \`${cell(entry.label)}\` | ${cell(entry.type)} | ${cell(entry.originalName)} | ${cell(entry.mimeType)} | ${cell(pathFor(entry))} | ${cell(entry.location)} |`,
   );
 
   return [
     "## Embedded media",
     "",
-    "| Label | Type | Original attachment | MIME type | Temporary path | Location |",
+    `| Label | Type | Original attachment | MIME type | ${pathHeading} | Location |`,
     "| --- | --- | --- | --- | --- | --- |",
     ...(rows.length ? rows : ["| _none_ |  |  |  |  |  |"]),
   ].join("\n");
