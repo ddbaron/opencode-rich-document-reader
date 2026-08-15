@@ -24,7 +24,7 @@ Ask the agent to call `read_rich_document` with a document path inside the curre
 
 The tool returns structure-preserving Markdown for headings, lists, tables, links, sections, slide context, notes, and supported document content. It also returns a structured media index in tool metadata.
 
-It appends an ordered embedded-media index containing each attachment's source name, MIME type, document section, and isolated temporary path.
+For calls without `export`, it appends an ordered embedded-media index containing each attachment's source name, MIME type, document section, and isolated temporary path.
 
 Use a media label from the index when vision inspection is relevant. The selected image is returned as a native OpenCode file attachment, while its isolated temporary path remains available for follow-up tools.
 
