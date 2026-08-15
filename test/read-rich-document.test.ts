@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { OfficeParserAST, OfficeParserConfig } from "officeparser";
 import { RichDocumentReaderPlugin } from "../src/index.ts";
 import { READER_LIMITS } from "../src/limits.ts";
@@ -69,9 +68,14 @@ describe("read_rich_document", () => {
     assert.deepEqual(calls.map(({ fileType }) => fileType), ["docx", "docx", "docx", "docx"]);
   });
 
-  it("reads the supplied pesticide records DOCX with content and metadata", async () => {
+  it("reads the supplied pesticide records DOCX with content and metadata", async (t) => {
+    const projectRoot = process.env.OPENCODE_RICH_DOCUMENT_SMOKE_ROOT;
+    if (!projectRoot) {
+      t.skip("set OPENCODE_RICH_DOCUMENT_SMOKE_ROOT to run the external supplied-document smoke test");
+      return;
+    }
+
     const sourcePath = "docs/maint-div/Pesticide Application Records.docx";
-    const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
     assert.equal((await stat(join(projectRoot, sourcePath))).isFile(), true);
 
     const result = await readRichDocument({ path: sourcePath }, projectContext(projectRoot));
